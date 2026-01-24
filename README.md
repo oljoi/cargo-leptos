@@ -453,3 +453,16 @@ What it does is equivalent to running this manually:
 
 When testing the setup, please try the above first. If that works but `cargo leptos end-to-end`
 doesn't then please create a GitHub ticket.
+
+## Note: `wasm-bindgen` version management
+
+`cargo-leptos` supports automatically downloading binary dependencies for tools like `wasm-bindgen-cli`.
+
+`wasm-bindgen-cli` requires a direct match between the patch version of the `wasm-bindgen` crate and the patch version of the `wasm-bindgen-cli` tool. This can sometimes make dependency management more complicated, because it means that `cargo` may resolve your `wasm-bindgen` version to a later patch version of the crate, causing a mismatched with your installed `wasm-bindgen-cli` version.
+
+Currently, `cargo-leptos` will:
+- detect whether you have `wasm-bindgen-cli` installed locally
+- detect the version of `wasm-bindgen` that's in your lockfile
+- download and install a corresponding `wasm-bindgen-cli` version locally if you don't have `wasm-bindgen-cli` installed.
+
+It does *not* download an updated or downgraded version if it finds `wasm-bindgen-cli` installed globally. If you have `wasm-bindgen-cli` installed globally, you will need to manage the verison manually. In the case of a mismatch, `wasm-bindgen-cli` emits an error message with precise instructions on how to either a) upgrade or downgrade `wasm-bindgen-cli` or b) pin the `wasm-bindgen` crate to the corresponding version.
