@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
 use super::ChangeSet;
-use crate::config::Project;
-use crate::ext::Paint;
-use crate::internal_prelude::*;
-use crate::signal::{Outcome, Product};
-use crate::{ext::PathExt, fs, logger::GRAY};
+use crate::{
+    config::Project,
+    ext::{Paint, PathExt},
+    fs,
+    internal_prelude::*,
+    logger::GRAY,
+    signal::{Outcome, Product},
+};
 use camino::{Utf8Path, Utf8PathBuf};
 use tokio::task::JoinHandle;
 
@@ -38,7 +41,7 @@ pub async fn assets(
 }
 
 pub fn reserved(src: &Utf8Path, pkg_dir: &Utf8Path) -> Vec<Utf8PathBuf> {
-    vec![src.join("index.html"), pkg_dir.to_path_buf()]
+    vec![src.join("index.html"), src.join(pkg_dir)]
 }
 
 // pub async fn update(config: &Config) -> Result<()> {
@@ -64,24 +67,16 @@ async fn resync(src: &Utf8Path, dest: &Utf8Path, pkg_dir: &Utf8Path) -> Result<(
 }
 
 async fn clean_dest(dest: &Utf8Path, pkg_dir: &Utf8Path) -> Result<()> {
-    let pkg_dir_name = match pkg_dir.file_name() {
-        Some(name) => name,
-        None => {
-            warn!("Assets No site-pkg-dir given, defaulting to 'pkg' for checks what to delete.");
-            warn!("Assets This will probably delete already generated files.");
-            "pkg"
-        }
-    };
-
+    let pkg_dir = dest.join(pkg_dir);
     let mut entries = fs::read_dir(dest).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
 
         if entry.file_type().await?.is_dir() {
-            if entry.file_name() != pkg_dir_name {
+            if !pkg_dir.starts_with(&path) {
                 debug!(
                     "Assets removing folder {}",
-                    GRAY.paint(path.to_string_lossy())
+                    GRAY.paint(path.to_string_lossy()),
                 );
                 fs::remove_dir_all(path).await?;
             }
@@ -97,14 +92,29 @@ async fn clean_dest(dest: &Utf8Path, pkg_dir: &Utf8Path) -> Result<()> {
 }
 
 async fn mirror(src_root: &Utf8Path, dest_root: &Utf8Path, reserved: &[Utf8PathBuf]) -> Result<()> {
+    if !src_root.exists() {
+        warn!(
+            "Assets source {} does not exist, skipping copying assets.",
+            GRAY.paint(src_root.as_str())
+        );
+        return Ok(());
+    }
+
+    // reserved paths should be relative to the source root
+    for r in reserved {
+        if r.exists() {
+            return Err(eyre!(
+                "Assets source {} contains path {} reserved for Leptos.\nThe build process potentially generates files at the same location in the site directory, so the asset cannot be copied to the site directory.\nPlease move, rename or remove this file or directory.",
+                src_root,
+                r,
+            ));
+        }
+    }
+
     let mut entries = src_root.read_dir_utf8()?;
     while let Some(Ok(entry)) = entries.next() {
         let from = entry.path().to_path_buf();
         let to = from.rebase(src_root, dest_root)?;
-        if reserved.contains(&from) {
-            warn!("");
-            continue;
-        }
 
         if entry.file_type()?.is_dir() {
             debug!(

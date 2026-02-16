@@ -70,7 +70,30 @@
             llvmPackages_latest.bintools
             zlib.out
             llvmPackages_latest.lld
+            (rust-bin.stable.latest.default.override {
+              extensions= [ "rust-src" "rust-analyzer" ];
+              targets = [ "wasm32-unknown-unknown" ];
+            })
+            (rust-bin.stable.latest.default.override {
+              extensions= [ "rust-src" "rust-analyzer" ];
+              targets = [ "wasm32-unknown-unknown" ];
+            })
+	    eza
+	    fd
+	    ripgrep
           ];
+
+          shellHook = ''
+            alias ls=exa
+            alias find=fd
+            alias grep=ripgrep
+            '';
+
+          shellHook = ''
+            alias ls=eza
+            alias find=fd
+            alias grep=ripgrep
+            '';
         };
       }
     );
