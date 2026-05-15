@@ -22,7 +22,7 @@ use crate::internal_prelude::*;
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::Metadata;
 pub use profile::Profile;
-pub use project::{Project, ProjectConfig};
+pub use project::{Project, ProjectConfig, ShutdownPolicy};
 pub use style::StyleConfig;
 pub use tailwind::TailwindConfig;
 pub use version::*;

@@ -1,18 +1,22 @@
-use std::sync::Arc;
-
 use crate::{
-    config::Project,
+    config::{Project, ShutdownPolicy},
     ext::{append_str_to_filename, determine_pdb_filename, fs, Paint},
     internal_prelude::*,
     logger::GRAY,
     signal::{Interrupt, ReloadSignal, ServerRestart},
 };
 use camino::Utf8PathBuf;
-use tokio::{
-    process::{Child, Command},
-    select,
-    task::JoinHandle,
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::AsyncWrite;
+use tokio::{join, process::Command, select, task::JoinHandle};
+use tokio_process_tools::{
+    AutoName, BroadcastOutputStream, Consumer, GracefulTimeouts, LineParsingOptions, Next,
+    NumBytesExt, Process, ProcessHandle, ReliableDelivery, ReplayEnabled,
+    DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_READ_CHUNK_SIZE,
 };
+
+const INSPECTOR_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub async fn spawn(proj: &Arc<Project>) -> JoinHandle<Result<()>> {
     let mut int = Interrupt::subscribe_shutdown();
@@ -22,16 +26,17 @@ pub async fn spawn(proj: &Arc<Project>) -> JoinHandle<Result<()>> {
         let mut server = ServerProcess::start_new(&proj).await?;
         loop {
             select! {
-              res = change.recv() => {
-                if let Ok(()) = res {
-                      server.restart().await?;
-                      ReloadSignal::send_full();
-                }
-              },
-              _ = int.recv() => {
-                    server.kill().await;
+                res = change.recv() => {
+                    if let Ok(()) = res {
+                          server.restart().await?;
+                          ReloadSignal::send_full();
+                    }
+                },
+                _ = int.recv() => {
+                    info!("Serve received interrupt signal");
+                    server.terminate().await;
                     return Ok(())
-              },
+                },
             }
         }
     })
@@ -45,18 +50,23 @@ pub async fn spawn_oneshot(proj: &Arc<Project>) -> JoinHandle<Result<()>> {
         select! {
           _ = server.wait() => {},
           _ = int.recv() => {
-                server.kill().await;
+                server.terminate().await;
           },
-        };
+        }
         Ok(())
     })
 }
 
 struct ServerProcess {
-    process: Option<Child>,
+    process: Option<(
+        ProcessHandle<BroadcastOutputStream<ReliableDelivery, ReplayEnabled>>,
+        Consumer<()>,
+        Consumer<()>,
+    )>,
     envs: Vec<(&'static str, String)>,
     binary: Utf8PathBuf,
     bin_args: Option<Vec<String>>,
+    shutdown_policy: ShutdownPolicy,
 }
 
 impl ServerProcess {
@@ -66,6 +76,7 @@ impl ServerProcess {
             envs: proj.to_envs(false),
             binary: proj.bin.exe_file.clone(),
             bin_args: proj.bin.bin_args.clone(),
+            shutdown_policy: proj.shutdown_policy,
         }
     }
 
@@ -75,27 +86,57 @@ impl ServerProcess {
         Ok(me)
     }
 
-    async fn kill(&mut self) {
-        if let Some(proc) = self.process.as_mut() {
-            if let Err(e) = proc.kill().await {
-                error!("Serve error killing server process: {e}");
-            } else {
-                trace!("Serve stopped");
-            }
-            self.process = None;
+    async fn terminate(&mut self) {
+        let Some((mut handle, stdout_inspector, stderr_inspector)) = self.process.take() else {
+            return;
+        };
+
+        let result = if self.shutdown_policy.graceful {
+            let timeouts = GracefulTimeouts::builder()
+                .unix((
+                    self.shutdown_policy.interrupt_timeout,
+                    self.shutdown_policy.terminate_timeout,
+                ))
+                .windows(self.shutdown_policy.terminate_timeout)
+                .build();
+
+            handle
+                .terminate(timeouts)
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        } else {
+            handle.kill().await.map_err(anyhow::Error::from)
+        };
+
+        if let Err(e) = result {
+            error!("Serve error terminating server process: {e}");
+        } else {
+            trace!("Serve stopped");
         }
+
+        let (stdout_err, stderr_err) = join!(
+            stdout_inspector.cancel(INSPECTOR_CANCEL_TIMEOUT),
+            stderr_inspector.cancel(INSPECTOR_CANCEL_TIMEOUT)
+        );
+        if let Err(err) = stdout_err {
+            error!("Serve error aborting stdout inspector: {err}");
+        };
+        if let Err(err) = stderr_err {
+            error!("Serve error aborting stderr inspector: {err}");
+        };
     }
 
     async fn restart(&mut self) -> Result<()> {
-        self.kill().await;
+        self.terminate().await;
         self.start().await?;
         trace!("Serve restarted");
         Ok(())
     }
 
     async fn wait(&mut self) -> Result<()> {
-        if let Some(proc) = self.process.as_mut() {
-            if let Err(e) = proc.wait().await {
+        if let Some((process, _, _)) = self.process.as_mut() {
+            if let Err(e) = process.wait_for_completion(Duration::MAX).await {
                 error!("Serve error while waiting for server process to exit: {e}");
             } else {
                 trace!("Serve process exited");
@@ -106,7 +147,7 @@ impl ServerProcess {
 
     async fn start(&mut self) -> Result<()> {
         let bin = &self.binary;
-        let child = if bin.exists() {
+        let process = if bin.exists() {
             // windows doesn't like to overwrite a running binary, so we copy it to a new name
             let bin_path = if cfg!(target_os = "windows") {
                 // solution to allow cargo to overwrite a running binary on some platforms:
@@ -139,12 +180,66 @@ impl ServerProcess {
             };
 
             debug!("Serve running {}", GRAY.paint(bin_path.as_str()));
-            let cmd = Some(
-                Command::new(bin_path)
-                    .envs(self.envs.clone())
-                    .args(bin_args)
-                    .spawn()?,
+            let mut cmd = Command::new(bin_path);
+            cmd.envs(self.envs.clone());
+            cmd.args(bin_args);
+
+            let handle = Process::new(cmd)
+                .name(AutoName::program_only())
+                .stdout_and_stderr(|stream| {
+                    stream
+                        .broadcast()
+                        .reliable_for_active_subscribers()
+                        .replay_last_bytes(1.megabytes())
+                        .read_chunk_size(DEFAULT_READ_CHUNK_SIZE)
+                        .max_buffered_chunks(DEFAULT_MAX_BUFFERED_CHUNKS)
+                })
+                .spawn()?;
+
+            async fn write_to<W: AsyncWrite + Unpin>(
+                mut to: W,
+                data: &str,
+            ) -> tokio::io::Result<()> {
+                use tokio::io::AsyncWriteExt;
+                to.write_all(data.as_bytes()).await?;
+                to.write_all(b"\n").await?;
+                to.flush().await?;
+                Ok(())
+            }
+
+            // Let's forward captured stdout/stderr lines to the output of our process. We do this
+            // asynchronously using the tokio::io::std{out|err}() handles, as writing to
+            // stdout/stderr directly using print!() could result in unhandled "failed printing to
+            // stdout: Resource temporarily unavailable" errors should the cargo-leptos output be
+            // consumed too slowly. This can happen because tokio puts the stdio fds into
+            // non-blocking mode (once touched) and std print! has no support for that, they just
+            // panic when an EAGAIN error is observed. Tokio's stdio handles instead asynchronously
+            // wait internally, handling the slow drainage and preventing a blocked runtime.
+            let stdout_inspector: Consumer<()> = handle.stdout().inspect_lines_async(
+                |line| {
+                    let line = line.to_string();
+                    async move {
+                        if let Err(err) = write_to(tokio::io::stdout(), &line).await {
+                            error!("Could not forward server process output to stdout: {err}");
+                        }
+                        Next::Continue
+                    }
+                },
+                LineParsingOptions::default(),
             );
+            let stderr_inspector: Consumer<()> = handle.stderr().inspect_lines_async(
+                |line| {
+                    let line = line.to_string();
+                    async move {
+                        if let Err(err) = write_to(tokio::io::stderr(), &line).await {
+                            error!("Could not forward server process output to stderr: {err}");
+                        }
+                        Next::Continue
+                    }
+                },
+                LineParsingOptions::default(),
+            );
+
             let port = self
                 .envs
                 .iter()
@@ -156,13 +251,18 @@ impl ServerProcess {
                     }
                 })
                 .unwrap_or_default();
-            info!("Serving at http://{port}");
-            cmd
+            let suffix = if self.shutdown_policy.graceful {
+                " (with graceful shutdown)"
+            } else {
+                ""
+            };
+            info!("Serving at http://{port}{suffix}");
+            Some((handle, stdout_inspector, stderr_inspector))
         } else {
             debug!("Serve no exe found {}", GRAY.paint(bin.as_str()));
             None
         };
-        self.process = child;
+        self.process = process;
         Ok(())
     }
 }

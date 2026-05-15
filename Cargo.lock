@@ -621,6 +621,7 @@ dependencies = [
  "target-lexicon",
  "temp-dir",
  "tokio",
+ "tokio-process-tools",
  "tracing",
  "walkdir",
  "wasm_split_cli_support",
@@ -5739,6 +5740,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-process-tools"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02f9a431cdcc558f10977cea3d3b94226cb1872631687e41139662f1b8abbbc3"
+dependencies = [
+ "bytes",
+ "memchr",
+ "nix 0.31.2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "typed-builder",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "tokio-rustls"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5952,6 +5969,26 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "typed-builder"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31aa81521b70f94402501d848ccc0ecaa8f93c8eb6999eb9747e72287757ffda"
+dependencies = [
+ "typed-builder-macro",
+]
+
+[[package]]
+name = "typed-builder-macro"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "076a02dc54dd46795c2e9c8282ed40bcfb1e22747e955de9389a1de28190fb26"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

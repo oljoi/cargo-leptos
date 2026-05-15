@@ -7,7 +7,7 @@ use crate::{
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::{Metadata, Package};
 use serde::Deserialize;
-use std::{collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc};
+use std::{collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 
 use super::{
     assets::AssetsConfig,
@@ -22,6 +22,23 @@ use super::{
 const CARGO_TARGET_DIR_MARKER: &str = "CARGO_TARGET_DIR";
 /// If the site root path starts with this marker, the marker should be replaced with the Cargo target directory
 const CARGO_BUILD_TARGET_DIR_MARKER: &str = "CARGO_BUILD_TARGET_DIR";
+
+const DEFAULT_GRACEFUL_SHUTDOWN: bool = true;
+const DEFAULT_GRACEFUL_SHUTDOWN_INTERRUPT_TIMEOUT_SECS: u64 = 4;
+const DEFAULT_GRACEFUL_SHUTDOWN_TERMINATE_TIMEOUT_SECS: u64 = 4;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ShutdownPolicy {
+    /// Whether graceful shutdown is enabled. If disabled, the served app will simply be killed.
+    pub graceful: bool,
+
+    /// Used for the SIGINT termination signal on Unix systems (3-phase graceful termination).
+    pub interrupt_timeout: Duration,
+
+    /// Used for the SIGTERM termination signal on Unix systems and the CTRL_BREAK_EVENT
+    /// signal on Windows systems (2-phase graceful termination, no interrupt equivalent).
+    pub terminate_timeout: Duration,
+}
 
 pub struct Project {
     /// absolute path to the working dir
@@ -53,6 +70,7 @@ pub struct Project {
     pub build_frontend_only: bool,
     pub build_server_only: bool,
     pub clear_terminal_on_rebuild: bool,
+    pub shutdown_policy: ShutdownPolicy,
 }
 
 impl Debug for Project {
@@ -77,6 +95,7 @@ impl Debug for Project {
             .field("always_erase_components", &self.always_erase_components)
             .field("server_fn_mod_path", &self.server_fn_mod_path)
             .field("wasm_opt_features", &self.wasm_opt_features)
+            .field("shutdown", &self.shutdown_policy)
             .finish_non_exhaustive()
     }
 }
@@ -149,6 +168,22 @@ impl Project {
                 wasm_opt_features: config.wasm_opt_features,
                 build_frontend_only: cli.frontend_only,
                 build_server_only: cli.server_only,
+                shutdown_policy: ShutdownPolicy {
+                    graceful: cli
+                        .graceful_shutdown
+                        .or(config.graceful_shutdown)
+                        .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN),
+                    interrupt_timeout: Duration::from_secs(
+                        cli.graceful_shutdown_interrupt_timeout_secs
+                            .or(config.graceful_shutdown_interrupt_timeout_secs)
+                            .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_INTERRUPT_TIMEOUT_SECS),
+                    ),
+                    terminate_timeout: Duration::from_secs(
+                        cli.graceful_shutdown_terminate_timeout_secs
+                            .or(config.graceful_shutdown_terminate_timeout_secs)
+                            .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_TERMINATE_TIMEOUT_SECS),
+                    ),
+                },
             };
             resolved.push(Arc::new(proj));
         }
@@ -343,6 +378,18 @@ pub struct ProjectConfig {
     /// different prefix and a hash suffix depending on the values of the other server fn configs).
     #[serde(default)]
     server_fn_mod_path: bool,
+
+    /// Whether to gracefully terminate the server process. Overridden by the `--graceful-shutdown`
+    /// CLI flag when explicitly set on the command line.
+    pub graceful_shutdown: Option<bool>,
+
+    /// Seconds to wait after sending SIGINT before escalating to SIGTERM during a graceful
+    /// shutdown. Overridden by the matching CLI flag when set.
+    pub graceful_shutdown_interrupt_timeout_secs: Option<u64>,
+
+    /// Seconds to wait after sending SIGTERM before escalating to SIGKILL during a graceful
+    /// shutdown. Overridden by the matching CLI flag when set.
+    pub graceful_shutdown_terminate_timeout_secs: Option<u64>,
 
     #[serde(skip)]
     pub config_dir: Utf8PathBuf,

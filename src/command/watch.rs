@@ -9,7 +9,8 @@ use crate::{
 use leptos_hot_reload::ViewMacros;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::try_join;
+use tokio::task::JoinHandle;
+use tokio::{join, try_join};
 
 pub async fn watch(proj: &Arc<Project>) -> Result<()> {
     // even if the build fails, we continue
@@ -36,17 +37,21 @@ pub async fn watch(proj: &Arc<Project>) -> Result<()> {
     };
 
     service::notify::spawn(proj, view_macros).await?;
-    service::serve::spawn(proj).await;
-    service::reload::spawn(proj).await;
+    let serve_service_jh = service::serve::spawn(proj).await;
+    let reload_service_jh = service::reload::spawn(proj).await;
 
-    let res = run_loop(proj).await;
+    let res = run_loop(proj, serve_service_jh, reload_service_jh).await;
     if res.is_err() {
         Interrupt::request_shutdown().await;
     }
     res
 }
 
-pub async fn run_loop(proj: &Arc<Project>) -> Result<()> {
+pub async fn run_loop(
+    proj: &Arc<Project>,
+    serve_service_jh: JoinHandle<Result<()>>,
+    reload_service_jh: JoinHandle<()>,
+) -> Result<()> {
     let mut int = Interrupt::subscribe_any();
     loop {
         debug!("Watch waiting for changes");
@@ -59,7 +64,22 @@ pub async fn run_loop(proj: &Arc<Project>) -> Result<()> {
         }
 
         if Interrupt::is_shutdown_requested().await {
-            debug!("Shutting down");
+            // Block until both services have finished their own shutdown work before returning.
+            // This is important for graceful termination to work. The timeout-driven termination
+            // inside `service::serve::ServerProcess::terminate` only has time to run if we keep the
+            // runtime alive while it does. Returning here early, without awaiting, would drop the
+            // tokio runtime out from under our in-flight `terminate()` call and the reload server's
+            // shutdown branch, defeating the graceful path entirely.
+            debug!("Shutting down. Waiting for serve and reload services to finish.");
+            let (serve_join, reload_join) = join!(serve_service_jh, reload_service_jh);
+            match serve_join {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => error!("'serve' service shut down with error: {err}"),
+                Err(err) => error!("Error while waiting for 'serve' service to shut down: {err}"),
+            }
+            if let Err(err) = reload_join {
+                error!("Error while waiting for 'reload' service to shut down: {err}");
+            }
             return Ok(());
         }
 
