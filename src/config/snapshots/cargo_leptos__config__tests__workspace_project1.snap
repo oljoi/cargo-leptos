@@ -82,8 +82,8 @@ Config {
             wasm_opt_features: None,
             shutdown: ShutdownPolicy {
                 graceful: true,
-                interrupt_timeout: 4s,
-                terminate_timeout: 4s,
+                timeout: 10s,
+                unix_signal: Sigint,
             },
             ..
         },
@@ -108,8 +108,8 @@ Config {
         frontend_only: false,
         server_only: false,
         graceful_shutdown: None,
-        graceful_shutdown_interrupt_timeout_secs: None,
-        graceful_shutdown_terminate_timeout_secs: None,
+        graceful_shutdown_timeout_secs: None,
+        graceful_shutdown_unix_signal: None,
     },
     watch: true,
     ..

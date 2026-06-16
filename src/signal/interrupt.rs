@@ -1,6 +1,5 @@
 use std::sync::LazyLock;
 use tokio::{
-    signal,
     sync::{broadcast, RwLock},
     task::JoinHandle,
 };
@@ -75,9 +74,37 @@ impl Interrupt {
 
     pub fn run_ctrl_c_monitor() -> JoinHandle<()> {
         tokio::spawn(async move {
-            signal::ctrl_c().await.expect("failed to listen for event");
-            info!("Leptos ctrl-c received");
+            let signal = wait_for_shutdown_signal().await;
+            info!("Received '{signal}' shutdown signal. Shutting down...");
             Interrupt::request_shutdown().await;
         })
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint =
+        signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+    let mut sigterm =
+        signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    }
+}
+
+#[cfg(windows)]
+async fn wait_for_shutdown_signal() -> &'static str {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+    let mut cc = ctrl_c().expect("failed to install Ctrl+C handler");
+    let mut cb = ctrl_break().expect("failed to install Ctrl+Break handler");
+    let mut cl = ctrl_close().expect("failed to install Ctrl+Close handler");
+    let mut cs = ctrl_shutdown().expect("failed to install Ctrl+Shutdown handler");
+    tokio::select! {
+        _ = cc.recv() => "CTRL_C",
+        _ = cb.recv() => "CTRL_BREAK",
+        _ = cl.recv() => "CTRL_CLOSE",
+        _ = cs.recv() => "CTRL_SHUTDOWN",
     }
 }

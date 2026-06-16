@@ -19,8 +19,8 @@ fn opts(project: Option<&str>) -> crate::config::Opts {
         server_only: false,
         clear: false,
         graceful_shutdown: None,
-        graceful_shutdown_interrupt_timeout_secs: None,
-        graceful_shutdown_terminate_timeout_secs: None,
+        graceful_shutdown_timeout_secs: None,
+        graceful_shutdown_unix_signal: None,
     }
 }
 

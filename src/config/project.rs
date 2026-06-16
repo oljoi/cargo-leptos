@@ -1,5 +1,5 @@
 use crate::{
-    config::{hash_file::HashFile, lib_package::LibPackage},
+    config::{hash_file::HashFile, lib_package::LibPackage, UnixSignal},
     ext::{PathBufExt, PathExt},
     internal_prelude::*,
     service::site::Site,
@@ -24,20 +24,21 @@ const CARGO_TARGET_DIR_MARKER: &str = "CARGO_TARGET_DIR";
 const CARGO_BUILD_TARGET_DIR_MARKER: &str = "CARGO_BUILD_TARGET_DIR";
 
 const DEFAULT_GRACEFUL_SHUTDOWN: bool = true;
-const DEFAULT_GRACEFUL_SHUTDOWN_INTERRUPT_TIMEOUT_SECS: u64 = 4;
-const DEFAULT_GRACEFUL_SHUTDOWN_TERMINATE_TIMEOUT_SECS: u64 = 4;
+const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_GRACEFUL_SHUTDOWN_UNIX_SIGNAL: UnixSignal = UnixSignal::Sigint;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ShutdownPolicy {
     /// Whether graceful shutdown is enabled. If disabled, the served app will simply be killed.
     pub graceful: bool,
 
-    /// Used for the SIGINT termination signal on Unix systems (3-phase graceful termination).
-    pub interrupt_timeout: Duration,
+    /// Time to wait after sending the configured shutdown signal before escalating to SIGKILL
+    /// (Unix) / TerminateProcess (Windows).
+    pub timeout: Duration,
 
-    /// Used for the SIGTERM termination signal on Unix systems and the CTRL_BREAK_EVENT
-    /// signal on Windows systems (2-phase graceful termination, no interrupt equivalent).
-    pub terminate_timeout: Duration,
+    /// Signal used on unix systems to gracefully shut down the user application.
+    /// Ignored on Windows.
+    pub unix_signal: UnixSignal,
 }
 
 pub struct Project {
@@ -173,16 +174,15 @@ impl Project {
                         .graceful_shutdown
                         .or(config.graceful_shutdown)
                         .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN),
-                    interrupt_timeout: Duration::from_secs(
-                        cli.graceful_shutdown_interrupt_timeout_secs
-                            .or(config.graceful_shutdown_interrupt_timeout_secs)
-                            .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_INTERRUPT_TIMEOUT_SECS),
+                    timeout: Duration::from_secs(
+                        cli.graceful_shutdown_timeout_secs
+                            .or(config.graceful_shutdown_timeout_secs)
+                            .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
                     ),
-                    terminate_timeout: Duration::from_secs(
-                        cli.graceful_shutdown_terminate_timeout_secs
-                            .or(config.graceful_shutdown_terminate_timeout_secs)
-                            .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_TERMINATE_TIMEOUT_SECS),
-                    ),
+                    unix_signal: cli
+                        .graceful_shutdown_unix_signal
+                        .or(config.graceful_shutdown_unix_signal)
+                        .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_UNIX_SIGNAL),
                 },
             };
             resolved.push(Arc::new(proj));
@@ -383,13 +383,13 @@ pub struct ProjectConfig {
     /// CLI flag when explicitly set on the command line.
     pub graceful_shutdown: Option<bool>,
 
-    /// Seconds to wait after sending SIGINT before escalating to SIGTERM during a graceful
-    /// shutdown. Overridden by the matching CLI flag when set.
-    pub graceful_shutdown_interrupt_timeout_secs: Option<u64>,
+    /// Seconds to wait after sending the configured shutdown signal before escalating to SIGKILL
+    /// (Unix) / TerminateProcess (Windows). Overridden by the matching CLI flag when set.
+    pub graceful_shutdown_timeout_secs: Option<u64>,
 
-    /// Seconds to wait after sending SIGTERM before escalating to SIGKILL during a graceful
-    /// shutdown. Overridden by the matching CLI flag when set.
-    pub graceful_shutdown_terminate_timeout_secs: Option<u64>,
+    /// The Unix signal to use as the first phase of graceful shutdown. Ignored on Windows.
+    /// Overridden by the matching CLI flag when set.
+    pub graceful_shutdown_unix_signal: Option<UnixSignal>,
 
     #[serde(skip)]
     pub config_dir: Utf8PathBuf,
